@@ -1,4 +1,4 @@
-use actix_web::{get, post, web::{self, ServiceConfig}, App, HttpResponse, HttpServer, Responder, middleware::Logger};
+use actix_web::{get, post, put, web::{self, ServiceConfig}, App, HttpResponse, HttpServer, Responder, middleware::Logger, HttpResponseBuilder, http::StatusCode, delete};
 use std::{
     fs,
     io::{self, Read, Write}
@@ -54,12 +54,64 @@ async fn add_product(product: web::Json<Product>) -> impl Responder {
     let mut json = open_json().expect("Could not open file");
 
     let product_json = serde_json::to_value(product).expect("Could not convert to json");
-    json.push(product_json);
+    let duplicate = json
+        .iter()
+        .filter(|p| p["sku"].eq(&product_json["sku"]))
+        .collect::<Vec<&serde_json::Value>>()
+        .is_empty();
 
-    let j = serde_json::to_value(json).expect("Could not convert to Json<Value>");
-    save_json(FILE_NAME, j).expect("Could not write json");
+    if !duplicate {
+        HttpResponseBuilder::new(StatusCode::from_u16(500).unwrap())
+    } else {
+        json.push(product_json);
 
-    HttpResponse::Ok()
+        let j = serde_json::to_value(json).expect("Could not convert to Json<Value>");
+        save_json(FILE_NAME, j).expect("Could not write json");
+
+        HttpResponse::Ok()
+    }
+}
+
+#[put("/products/{sku}")]
+async fn update_product(product: web::Json<Product>, path: web::Path<String>) -> impl Responder {
+    let mut json = open_json().expect("Could not open file");
+    let sku = path.into_inner();
+
+    if let Some(pos) = json.iter().position(|p| p["sku"].eq(&sku)) {
+        let p = json.get_mut(pos).unwrap();
+        *p = serde_json::to_value(product).expect("Could not convert to json");
+
+        save_json(
+            FILE_NAME,
+            serde_json::to_value(json).expect("Could not convert to Json<Value>")
+        ).expect("Could not write json");
+
+        HttpResponse::Ok()
+    } else {
+        HttpResponseBuilder::new(StatusCode::from_u16(500).unwrap())
+    }
+}
+
+#[delete("/products/{sku}")]
+async fn remove_product(path: web::Path<String>) -> impl Responder {
+    let mut json = open_json().expect("Could not open file");
+    let size_before = json.len();
+    let sku = path.into_inner();
+
+    json.retain(|p| {
+        p["sku"].ne(&sku)
+    });
+
+    if size_before == json.len() {
+        HttpResponseBuilder::new(StatusCode::from_u16(500).unwrap())
+    } else {
+        save_json(
+            FILE_NAME,
+            serde_json::to_value(json).expect("Could not convert to Json<Value>")
+        ).expect("Could not write json");
+
+        HttpResponse::Ok()
+    }
 }
 
 pub fn init(config: &mut ServiceConfig) {
@@ -69,6 +121,8 @@ pub fn init(config: &mut ServiceConfig) {
                 .service(index)
                 .service(products)
                 .service(add_product)
+                .service(remove_product)
+                .service(update_product)
         );
 }
 
