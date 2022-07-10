@@ -1,12 +1,15 @@
+mod lib;
+
 use actix_web::{get, post, put, web::{self, ServiceConfig}, App, HttpResponse, HttpServer, Responder, middleware::Logger, HttpResponseBuilder, http::StatusCode, delete};
 use reqwest::{header::{HeaderMap, HeaderValue}, Client};
 use serde_json::json;
 use std::{
     fs,
-    io::{self, Read, Write}, sync::Arc
+    io::{self, Read, Write}
 };
 use futures::future;
-use kaspi_rs::{product::Product, upload_result::{UploadStatus, UploadResult}};
+use kaspi_rs::product::Product;
+use lib::{check_code, send_to_kaspi};
 
 const FILE_NAME: &'static str = "products.json";
 
@@ -19,7 +22,6 @@ fn read_file(file_name: &str) -> io::Result<fs::File> {
     fs::File::open(file_name).or_else(|_| {
         let mut f = fs::File::create(file_name).expect("Could not create a json file");
         f.write_all(b"[]").expect("Could not populate json file");
-        println!("Created a json file");
 
         Ok(f)
     })
@@ -53,29 +55,31 @@ async fn show() -> impl Responder {
 }
 
 #[post("")]
-async fn add(mut product: web::Json<Product>, client: web::Data<Client>) -> impl Responder {
+async fn add(products: web::Json<Vec<Product>>, client: web::Data<Client>) -> impl Responder {
     let mut json = open_json().expect("Could not open file");
 
-    let product = product.set_id();
+    for mut product in products.into_inner().into_iter() {
+        product.set_id();
 
-    let mut product_json = serde_json::to_value(product).expect("Could not convert to json");
-    let duplicate = json
-        .iter()
-        .filter(|p| p["sku"].eq(&product_json["sku"]))
-        .collect::<Vec<&serde_json::Value>>()
-        .is_empty() ^ true;
+        let mut product_json = serde_json::to_value(product).expect("Could not convert to json");
+        let duplicate = json
+            .iter()
+            .filter(|p| p["sku"].eq(&product_json["sku"]))
+            .collect::<Vec<&serde_json::Value>>()
+            .is_empty() ^ true;
 
-    if duplicate {
-        HttpResponseBuilder::new(StatusCode::from_u16(500).unwrap())
-    } else {
-        product_json = send_to_kaspi(product_json, client.into_inner()).await.expect("Error while sending product to kaspi");
-        json.push(product_json);
+        if duplicate {
+            return HttpResponseBuilder::new(StatusCode::from_u16(500).unwrap()).body(format!("Duplicate found: {}", product_json["sku"]))
+        } else {
+            product_json = send_to_kaspi(product_json, client.clone().into_inner()).await.expect("Error while sending product to kaspi");
+            json.push(product_json);
 
-        let j = serde_json::to_value(json).expect("Could not convert to Json<Value>");
-        save_json(FILE_NAME, j).expect("Could not write json");
-
-        HttpResponse::Ok()
+        }
     }
+    let j = serde_json::to_value(json).expect("Could not convert to Json<Value>");
+    save_json(FILE_NAME, j).expect("Could not write json");
+
+    HttpResponse::Ok().body("")
 }
 
 #[put("/{sku}")]
@@ -98,25 +102,25 @@ async fn update(product: web::Json<Product>, path: web::Path<String>) -> impl Re
     }
 }
 
-#[delete("/{sku}")]
+#[delete("/{id}")]
 async fn remove(path: web::Path<String>) -> impl Responder {
     let mut json = open_json().expect("Could not open file");
     let size_before = json.len();
-    let sku = path.into_inner();
+    let id = path.into_inner();
 
     json.retain(|p| {
-        p["sku"].ne(&sku)
+        p["id"].ne(&id)
     });
 
     if size_before == json.len() {
-        HttpResponseBuilder::new(StatusCode::from_u16(500).unwrap())
+        HttpResponseBuilder::new(StatusCode::from_u16(500).unwrap()).body("ID not found")
     } else {
         save_json(
             FILE_NAME,
             serde_json::to_value(json).expect("Could not convert to Json<Value>")
         ).expect("Could not write json");
 
-        HttpResponse::Ok()
+        HttpResponse::Ok().body("")
     }
 }
 
@@ -135,50 +139,7 @@ async fn check(path: web::Path<String>, client: web::Data<Client>) -> impl Respo
     HttpResponseBuilder::new(StatusCode::OK).json(response_json)
 }
 
-async fn send_to_kaspi(mut product: serde_json::Value, client: Arc<Client>) -> anyhow::Result<serde_json::Value> {
-    let response = client.post(
-        "https://kaspi.kz/shop/api/products/import"
-    ).header("Content-Type", "text/plain").body(product.to_string()).send().await.expect("Could not send request");
-    dbg!(&response);
 
-    let response_json = serde_json::to_value(response.json::<UploadStatus>().await.expect("Could not read response json")).expect("Could not create json");
-    dbg!(&response_json);
-
-    product.as_object_mut().expect("Could not create an object")
-        .insert(
-            String::from("code"),
-            response_json.get("code").expect("No such field").to_owned()
-        ).expect("Could not add a field");
-    product.as_object_mut().expect("Could not create an object")
-        .insert(
-            String::from("status"),
-            response_json.get("status").expect("No such field").to_owned()
-        ).expect("Could not add a field");
-
-    Ok(product)
-}
-
-async fn check_code(code: &str, client: Arc<Client>) -> serde_json::Value {
-    let mut response = client.get(
-        format!("https://kaspi.kz/shop/api/products/import?i={}", code)
-    ).send().await.expect("Could not send request");
-
-    let mut response_json = serde_json::to_value(
-        response.json::<UploadStatus>().await.expect("Could not fetch response text")
-    ).expect("Could not convert to json");
-
-    if response_json["status"] == "FINISHED" {
-        response = client.get(
-            format!("https://kaspi.kz/shop/api/products/import/result?i={}", code)
-        ).send().await.expect("Could not send request");
-
-        response_json = serde_json::to_value(
-            response.json::<UploadResult>().await.expect("Could not fetch response text")
-        ).expect("Could not convert to json");
-    }
-
-    response_json
-}
 
 #[get("")]
 async fn check_all(client: web::Data<Client>) -> impl Responder {
@@ -221,11 +182,13 @@ pub fn init(config: &mut ServiceConfig) {
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     let api_key = dotenv::var("KASPI_API").expect("Kaspi API key is not provided");
 
     let mut headers = HeaderMap::new();
     headers.insert("X-Auth-Token", HeaderValue::from_str(api_key.as_str()).expect("Could not create HeaderValue"));
+    headers.insert("Content-Type", HeaderValue::from_str("text/plain").expect("Could not create HeaderValue"));
+    headers.insert("Accept", HeaderValue::from_str("application/jason").expect("Could not create HeaderValue"));
 
     let client = Client::builder().default_headers(headers).build()?;
 
@@ -239,4 +202,25 @@ async fn main() -> anyhow::Result<()> {
             .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, from_value};
+    use serde::{Serialize, Deserialize};
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct ABC {
+        a: String
+    }
+
+    #[test]
+    fn vec() {
+        let json_a = json!([{
+            "a": "b"
+        }]);
+        let typed_a = from_value::<Vec<ABC>>(json_a).expect("Could not parse json");
+
+        assert_eq!(typed_a, vec![ABC { a: String::from("b") }]);
+    }
 }
