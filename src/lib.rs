@@ -1,53 +1,93 @@
+pub mod routes;
+pub mod json_processing;
+pub mod entities;
+
+use uuid::Uuid;
 use std::sync::Arc;
 use reqwest::Client;
-use kaspi_rs::upload_result::{UploadStatus, UploadResult};
+use serde_json::json;
+use crate::entities::{
+    upload_result::*,
+    product::Record,
+};
 
-pub(crate) async fn send_to_kaspi(product: serde_json::Value, client: Arc<Client>) -> anyhow::Result<serde_json::Value> {
+pub(crate) async fn send_to_kaspi(product: serde_json::Value, client: Arc<Client>) -> anyhow::Result<Record> {
+    // Kaspi requires an array of products
+    // Create a vector for a product
     let product_vec = serde_json::to_value([product]).expect("Could not create json");
-    let response = client.post(
-        "https://kaspi.kz/shop/api/products/import"
-    ).header("Content-Type", "text/plain").body(product_vec.to_string()).send().await.expect("Could not send request");
 
-    let response_json = serde_json::to_value(response.json::<UploadStatus>().await.expect("Could not read response json")).expect("Could not create json");
-    println!("{}", response_json);
+    // Take response for uploading request
+    let response = client
+        .post("https://kaspi.kz/shop/api/products/import")
+        .header("Content-Type", "text/plain")
+        .body(product_vec.to_string())
+        .send()
+        .await.expect("Could not send request");
 
-    let mut product = product_vec.as_array().expect("Could not create an array").first().expect("Array is empty").clone();
-    product.as_object_mut().expect("Could not create an object")
-        .insert(
-            String::from("code"),
-            response_json.get("code").expect("No such field").to_owned()
-        ).expect("Could not add a field");
-    product.as_object_mut().expect("Could not create an object")
-        .insert(
-            String::from("status"),
-            response_json.get("status").expect("No such field").to_owned()
-        ).expect("Could not add a field");
+    // Convert response to json value
+    let response = serde_json::to_value(
+        response.json::<UploadStatus>()
+        .await.expect("Could not read response json")
+    ).expect("Could not create json");
 
-    Ok(product.to_owned())
+    // Get the element from the array
+    let product = product_vec
+        .as_array().expect("Could not create an array")
+        .first().expect("Array is empty")
+        .clone();
+
+    // Create a record json
+    let record_json = json!(
+        {
+            "id": Uuid::new_v4().to_string(),
+            "product": product,
+            "code": response["code"],
+            "status": response["status"]
+        }
+    );
+
+    // Convert json to Record type
+    let record: Record = serde_json::from_value(record_json).expect("Could not create a record from json");
+
+    Ok(record)
 }
 
-pub(crate) async fn check_code(code: &str, client: Arc<Client>) -> serde_json::Value {
+pub(crate) async fn check_code(id: &str, code: &str, client: Arc<Client>) -> serde_json::Value {
+    // Get reponse of checking request
     let mut response = client.get(
         format!("https://kaspi.kz/shop/api/products/import?i={}", code)
     ).send().await.expect("Could not send request");
 
-    let mut response_json = serde_json::to_value(
-        response.json::<UploadStatus>().await.expect("Could not fetch response json")
-    ).expect("Could not convert to json");
+    // Convert response to json value
+    let upload_status = response.json::<UploadStatus>()
+        .await.expect("Could not fetch response json");
 
-    // TODO: handle states:
-    //  * FINISHED
-    //  * UPLOADED
-    //  * ABORTED (new field - description)
-    if response_json["status"].ne("UPLOADED") {
-        response = client.get(
-            format!("https://kaspi.kz/shop/api/products/import/result?i={}", code)
-        ).send().await.expect("Could not send request");
+    let status = upload_status.get_status();
+    let mut response_json = serde_json::to_value(upload_status).expect("Could not create json");
 
-        response_json = serde_json::to_value(
-            response.json::<UploadResult>().await.expect("Could not parse response text")
-        ).expect("Could not convert to json");
+    // If uploading is complete, get result and update the record
+    match status.as_str() {
+        "FINISHED" => {
+            response = client.get(
+                format!("https://kaspi.kz/shop/api/products/import/result?i={}", code)
+            ).send().await.expect("Could not send request");
+
+            response_json = serde_json::to_value(
+                response.json::<UploadResult>()
+                .await.expect("Could not fetch response json")
+            ).expect("Could not create json");
+
+            // update record
+        }
+        "ABORTED" => {
+            // update record
+        }
+        _ => {}
     }
 
-    response_json
+    json!({
+        "id": id,
+        "code": code,
+        "response": response_json
+    })
 }
