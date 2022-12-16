@@ -47,7 +47,8 @@ pub(crate) async fn send_to_kaspi(product: serde_json::Value, client: Arc<Client
     );
 
     // Convert json to Record type
-    let record: Record = serde_json::from_value(record_json).expect("Could not create a record from json");
+    let record: Record = serde_json::from_value(record_json)
+        .expect("Could not create a record from json");
 
     Ok(record)
 }
@@ -63,31 +64,29 @@ pub(crate) async fn check_code(id: &str, code: &str, client: Arc<Client>) -> ser
         .await.expect("Could not fetch response json");
 
     let status = upload_status.get_status();
-    let mut response_json = serde_json::to_value(upload_status).expect("Could not create json");
+    let mut response_json = serde_json::to_value(upload_status)
+        .expect("Could not create json");
 
     // If uploading is complete, get result and update the record
-    match status.as_str() {
-        "FINISHED" => {
-            response = client.get(
-                format!("https://kaspi.kz/shop/api/products/import/result?i={}", code)
-            ).send().await.expect("Could not send request");
+    if status.as_str() != "UPLOADED" {
+        // Get response for result request
+        response = client.get(
+            format!("https://kaspi.kz/shop/api/products/import/result?i={}", code)
+        ).send().await.expect("Could not send request");
 
-            response_json = serde_json::to_value(
-                response.json::<UploadResult>()
-                .await.expect("Could not fetch response json")
-            ).expect("Could not create json");
+        // Convert response to json
+        response_json = serde_json::to_value(
+            response.json::<UploadResult>()
+            .await.expect("Could not fetch response json")
+        ).expect("Could not create json");
 
-            // update record
-        }
-        "ABORTED" => {
-            // update record
-        }
-        _ => {}
+        // update record
     }
 
     json!({
         "id": id,
         "code": code,
+        "status": status,
         "response": response_json
     })
 }
