@@ -9,14 +9,14 @@ pub struct KaspiCategoryAttribute {
     pub mandatory: bool,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[derive(Serialize, Deserialize, Eq, Hash, PartialEq, Debug, Clone)]
 #[serde(untagged)]
 pub enum AttributeValue {
     String(String),
     Boolean(bool)
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[derive(Serialize, Deserialize, Eq, Hash, PartialEq, Debug, Clone)]
 pub struct Attribute {
     pub code: String,
     pub value: AttributeValue,

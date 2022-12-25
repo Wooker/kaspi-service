@@ -1,42 +1,42 @@
-use actix_web::{get, web, Responder, HttpResponseBuilder, http::StatusCode};
+use actix_web::{get, web, Responder, HttpResponse, HttpResponseBuilder, http::StatusCode};
 use reqwest::Client;
 use futures::future;
 use serde_json::json;
-use crate::check_code;
-use crate::json_processing::*;
+use uuid::Uuid;
+use crate::{
+    STORE,
+    check_code,
+};
 
 #[get("/{id}")]
 async fn check(path: web::Path<String>, client: web::Data<Client>) -> impl Responder {
-    let id = path.into_inner();
+    let id = path.as_str();
 
-    let json = open_json().expect("Could not open file");
-    let product = json.into_iter().find(|p| p["id"].eq(&id)).expect("Could not find product with such id");
-
-    let response_json = check_code(
-        &id,
-        product["code"].as_str().unwrap(),
+    let result = check_code(
+        &Uuid::parse_str(id).unwrap(),
         client.into_inner()
     ).await;
 
-    HttpResponseBuilder::new(StatusCode::OK).json(response_json)
+    if let Ok(response_json) = result {
+        HttpResponse::Ok().json(response_json)
+    } else {
+        HttpResponse::InternalServerError().finish()
+    }
 }
 
 #[get("/")]
 async fn check_all(client: web::Data<Client>) -> impl Responder {
-    let json = open_json().expect("Could not open file");
-
     let result: Vec<serde_json::Value> = future::join_all(
-        json.iter().map(|p| {
+        STORE.uploaded_ids().await.iter().map(|id| {
             check_code(
-                p["id"].as_str().unwrap(),
-                p["code"].as_str().unwrap(),
+                id,
                 client.clone().into_inner()
             )
         }
     )).await
-        .iter()
-        .map(|r| json!(r))
+        .into_iter()
+        .map(|r| json!(r.unwrap()))
         .collect();
 
-    HttpResponseBuilder::new(StatusCode::OK).json(serde_json::to_value(result).expect("Could not create json"))
+    HttpResponse::Ok().json(serde_json::to_value(result).expect("Could not create json"))
 }

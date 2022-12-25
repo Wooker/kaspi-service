@@ -4,9 +4,15 @@ use actix_web::{
     middleware::Logger
 };
 use reqwest::{header::{HeaderMap, HeaderValue}, Client};
-use kaspi_service::routes::{
-    products::{show_all, show, add, remove},
-    code::{check_all, check}
+use log::info;
+
+use kaspi_service::{
+    spawn_save,
+    routes::{
+        products::{show_all, show, add, remove},
+        code::{check_all, check},
+    },
+    STORE,
 };
 
 
@@ -30,6 +36,11 @@ pub fn init(config: &mut ServiceConfig) {
 async fn main() -> anyhow::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     let api_key = dotenv::var("KASPI_API").expect("Kaspi API key is not provided");
+    println!("Shirin");
+
+    STORE.fill().await;
+    info!("{} products", STORE.products().await.len());
+    info!("{} entries waiting to be uploaded", STORE.uploaded_len().await);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -55,6 +66,8 @@ async fn main() -> anyhow::Result<()> {
             .bind("localhost:8000")?
             .run()
             .await?;
+
+    spawn_save().await;
 
     Ok(())
 }
